@@ -200,6 +200,106 @@ def delete_non_png_in_tongue(root_directory, dry_run=False, verbose=True):
     return {'deleted': deleted, 'errors': errors}
 
 
+def replace_frame_numbers_with_image_names(jaw_csv_path, tongue_folder_path, output_csv_path=None, dry_run=True):
+    """Replace the 'frame' column values in a Jaw CSV with the sorted image basenames
+
+    This reads a CSV with header 'frame,x,y' and replaces the values in the first
+    column with the basenames (without extension) of files found in
+    ``tongue_folder_path``, sorted ascending. The resulting CSV is written to
+    ``output_csv_path`` if provided, otherwise the original file is overwritten
+    unless ``dry_run`` is True.
+
+    Args:
+        jaw_csv_path (str): Path to the jaw CSV file to modify.
+        tongue_folder_path (str): Path to the labels/tongue folder containing images.
+        output_csv_path (str|None): Path to write the modified CSV. If None and
+            dry_run is False, will overwrite ``jaw_csv_path``.
+        dry_run (bool): If True, do not write changes, only return the planned
+            output and counts.
+
+    Returns:
+        dict: Summary with keys: 'rows', 'images_found', 'written' (bool),
+              'output_path' (str), 'error' (str or None)
+    """
+    import csv
+
+    # Basic validation
+    if not os.path.exists(jaw_csv_path):
+        return {'rows': 0, 'images_found': 0, 'written': False, 'output_path': None,
+                'error': f'jaw_csv_path does not exist: {jaw_csv_path}'}
+
+    if not os.path.isdir(tongue_folder_path):
+        return {'rows': 0, 'images_found': 0, 'written': False, 'output_path': None,
+                'error': f'tongue_folder_path does not exist or is not a directory: {tongue_folder_path}'}
+
+    # List files in tongue folder and extract basenames
+    all_files = [f for f in os.listdir(tongue_folder_path) if os.path.isfile(os.path.join(tongue_folder_path, f))]
+    if not all_files:
+        return {'rows': 0, 'images_found': 0, 'written': False, 'output_path': None,
+                'error': 'No files found in tongue folder'}
+
+    # Map to basenames without extension
+    basenames = [os.path.splitext(f)[0] for f in all_files]
+
+    # Try to sort basenames numerically when possible, otherwise lexicographically
+    def sort_key(s):
+        try:
+            return (0, int(s))
+        except Exception:
+            return (1, s)
+
+    basenames_sorted = sorted(basenames, key=sort_key)
+
+    # Read jaw csv rows
+    rows = []
+    with open(jaw_csv_path, 'r', newline='') as fh:
+        reader = csv.reader(fh)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return {'rows': 0, 'images_found': len(basenames_sorted), 'written': False,
+                    'output_path': None, 'error': 'Empty CSV'}
+        # Keep the rest
+        for r in reader:
+            if not r:
+                continue
+            rows.append(r)
+
+    num_rows = len(rows)
+    num_images = len(basenames_sorted)
+
+    if num_images < num_rows:
+        return {'rows': num_rows, 'images_found': num_images, 'written': False, 'output_path': None,
+                'error': 'Not enough images to replace all frame values'}
+
+    # Replace the first column values with basenames (use first N images)
+    new_rows = []
+    for i, row in enumerate(rows):
+        new_frame = basenames_sorted[i]
+        # Ensure row has at least 3 columns; if not, pad with empty strings
+        while len(row) < 3:
+            row.append('')
+        new_rows.append([new_frame, row[1], row[2]])
+
+    # Decide output path
+    if output_csv_path is None:
+        output_csv_path = jaw_csv_path
+
+    if dry_run:
+        return {'rows': num_rows, 'images_found': num_images, 'written': False, 'output_path': output_csv_path, 'error': None}
+
+    # Write CSV
+    try:
+        with open(output_csv_path, 'w', newline='') as fh:
+            writer = csv.writer(fh)
+            writer.writerow(header)
+            for r in new_rows:
+                writer.writerow(r)
+        return {'rows': num_rows, 'images_found': num_images, 'written': True, 'output_path': output_csv_path, 'error': None}
+    except Exception as e:
+        return {'rows': num_rows, 'images_found': num_images, 'written': False, 'output_path': output_csv_path, 'error': str(e)}
+
+
 if __name__ == '__main__':
     # Simple CLI for local runs
     import argparse
