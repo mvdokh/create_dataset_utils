@@ -62,3 +62,152 @@ def clean_directory(directory_path, dry_run=True):
         dict: Dictionary with 'deleted' and 'errors' counts
     """
     return delete_unwanted_files(directory_path, dry_run=dry_run)
+
+
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - pillow may not be installed in all environments
+    Image = None
+
+
+def convert_tongue_labels_to_png(root_directory, remove_original=True, verbose=True):
+    """Convert all images inside any "labels/tongue" folders under ``root_directory`` to PNG.
+
+    This walks the tree rooted at ``root_directory``. Whenever it finds a folder named
+    "tongue" whose parent folder is named "labels", it will convert any non-PNG files in
+    that folder to PNG using Pillow.
+
+    Args:
+        root_directory (str): Root folder to search under.
+        remove_original (bool): If True, remove the original file after successful conversion.
+        verbose (bool): If True, log conversions to the standard logger.
+
+    Returns:
+        dict: Summary with keys: converted (int), skipped (int), errors (list of (path, error_str)).
+    """
+    import logging
+    import os
+
+    logger = logging.getLogger(__name__)
+    if verbose:
+        logging.basicConfig(level=logging.INFO, format='%(message)s')
+
+    if Image is None:
+        raise RuntimeError('Pillow is required for image conversion. Please install with `pip install pillow`.')
+
+    if not os.path.exists(root_directory):
+        raise ValueError(f'Root directory does not exist: {root_directory}')
+
+    converted = 0
+    skipped = 0
+    errors = []
+
+    # Walk the tree and look for folders named 'tongue' whose parent is 'labels'
+    for dirpath, dirnames, filenames in os.walk(root_directory):
+        base = os.path.basename(dirpath).lower()
+        parent = os.path.basename(os.path.dirname(dirpath)).lower()
+        if base == 'tongue' and parent == 'labels':
+            if verbose:
+                logger.info(f'Processing folder: {dirpath}')
+
+            for fname in filenames:
+                src_path = os.path.join(dirpath, fname)
+                if not os.path.isfile(src_path):
+                    continue
+                ext = os.path.splitext(fname)[1].lower()
+                if ext == '.png':
+                    skipped += 1
+                    continue
+
+                try:
+                    with Image.open(src_path) as im:
+                        # Choose an output mode that preserves alpha if present
+                        if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
+                            out_mode = 'RGBA'
+                        else:
+                            out_mode = 'RGB'
+                        converted_im = im.convert(out_mode)
+
+                        dst_path = os.path.splitext(src_path)[0] + '.png'
+                        # Save as PNG
+                        converted_im.save(dst_path, format='PNG', optimize=True)
+
+                    if remove_original:
+                        try:
+                            os.remove(src_path)
+                        except Exception:
+                            # If removal fails, leave the file but still count as converted
+                            logger.warning(f'Could not remove original file: {src_path}')
+
+                    converted += 1
+                    if verbose:
+                        logger.info(f'Converted: {src_path} -> {dst_path}')
+
+                except Exception as e:
+                    errors.append((src_path, str(e)))
+                    logger.exception(f'Failed to convert {src_path}: {e}')
+
+    return {'converted': converted, 'skipped': skipped, 'errors': errors}
+
+
+def delete_non_png_in_tongue(root_directory, dry_run=False, verbose=True):
+    """Delete any files that are not .png inside any `labels/tongue` folders under root.
+
+    Args:
+        root_directory (str): Root folder to search under.
+        dry_run (bool): If True, only log what would be deleted.
+        verbose (bool): If True, print progress messages.
+
+    Returns:
+        dict: {'deleted': int, 'errors': [(path, err_str), ...]}
+    """
+    import logging
+    import os
+
+    logger = logging.getLogger(__name__)
+    if verbose:
+        logging.basicConfig(level=logging.INFO, format='%(message)s')
+
+    if not os.path.exists(root_directory):
+        raise ValueError(f'Root directory does not exist: {root_directory}')
+
+    deleted = 0
+    errors = []
+
+    for dirpath, dirnames, filenames in os.walk(root_directory):
+        base = os.path.basename(dirpath).lower()
+        parent = os.path.basename(os.path.dirname(dirpath)).lower()
+        if base == 'tongue' and parent == 'labels':
+            if verbose:
+                logger.info(f'Checking folder for non-PNG files: {dirpath}')
+
+            for fname in filenames:
+                if fname.lower().endswith('.png'):
+                    continue
+                src_path = os.path.join(dirpath, fname)
+                try:
+                    if dry_run:
+                        logger.info(f'Would delete: {src_path}')
+                    else:
+                        os.remove(src_path)
+                        if verbose:
+                            logger.info(f'Deleted: {src_path}')
+                    deleted += 1
+                except Exception as e:
+                    errors.append((src_path, str(e)))
+                    logger.exception(f'Could not remove original file: {src_path}: {e}')
+
+    return {'deleted': deleted, 'errors': errors}
+
+
+if __name__ == '__main__':
+    # Simple CLI for local runs
+    import argparse
+    parser = argparse.ArgumentParser(description='Convert images in labels/tongue to PNG')
+    parser.add_argument('root', help='Root directory to search under')
+    parser.add_argument('--keep-original', dest='remove_original', action='store_false',
+                        help='Do not remove original files after conversion')
+    parser.add_argument('--quiet', dest='verbose', action='store_false', help='Do not print conversion logs')
+    args = parser.parse_args()
+    summary = convert_tongue_labels_to_png(args.root, remove_original=args.remove_original, verbose=args.verbose)
+    print('Summary:', summary)
