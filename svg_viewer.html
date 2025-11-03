@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SVG Folder Viewer</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:system-ui,Segoe UI,Roboto,Arial}
+    .topbar{display:flex;gap:.5rem;align-items:center;padding:.5rem;background:#111;color:#fff}
+    .topbar input{display:inline-block}
+    #info{margin-left:auto;font-size:.9rem;opacity:.9}
+    .controls button{margin-right:.25rem}
+    #container{height:calc(100% - 56px);display:flex;flex-direction:column}
+    #viewport{flex:1;position:relative;background:#222;overflow:hidden;display:flex;align-items:center;justify-content:center}
+    #viewport .dropzone{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#aaa;pointer-events:none}
+  #svgwrap{position:relative;touch-action:none;cursor:grab;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+    #svgwrap.dragging{cursor:grabbing}
+  svg, object{display:block;max-width:100%;max-height:100%;width:auto;height:auto}
+    .footer{padding:.5rem;background:#f5f5f5;border-top:1px solid #ddd;display:flex;align-items:center;gap:.5rem}
+    .footer .filename{font-family:monospace}
+    .kbd{opacity:.8;font-size:.9rem}
+    a.link{color:inherit}
+    @media (max-width:600px){.topbar{flex-wrap:wrap}}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="controls">
+      <button id="prevBtn">◀ Prev</button>
+      <button id="nextBtn">Next ▶</button>
+      <button id="zoomInBtn">＋</button>
+      <button id="zoomOutBtn">－</button>
+      <button id="fitBtn">Fit</button>
+      <button id="resetBtn">Reset</button>
+    </div>
+
+    <label style="margin-left:8px">Select folder or files
+      <input id="fileInput" type="file" webkitdirectory directory multiple style="margin-left:.25rem">
+    </label>
+
+    <div id="info">No files loaded</div>
+  </div>
+
+  <div id="container">
+    <div id="viewport">
+      <div class="dropzone">Drop SVG files or folder here (or use the "Select folder" button)</div>
+      <div id="svgwrap" tabindex="0"></div>
+    </div>
+
+    <div class="footer">
+      <div class="filename">—</div>
+      <div style="margin-left:auto" class="kbd">←/→: prev/next &nbsp; +/-: zoom &nbsp; 0: fit</div>
+    </div>
+  </div>
+
+  <script>
+    // Simple SVG folder viewer with zoom/pan and navigation
+    const fileInput = document.getElementById('fileInput');
+    const svgwrap = document.getElementById('svgwrap');
+    const dropzone = document.querySelector('.dropzone');
+    const info = document.getElementById('info');
+    const filenameEl = document.querySelector('.filename');
+
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+    const zoomInBtn = document.getElementById('zoomInBtn');
+    const zoomOutBtn = document.getElementById('zoomOutBtn');
+    const fitBtn = document.getElementById('fitBtn');
+    const resetBtn = document.getElementById('resetBtn');
+
+    let files = []; // array of File objects (SVG)
+    let index = 0;
+
+    // transform state
+    let scale = 1;
+    let tx = 0, ty = 0;
+    let isPanning = false;
+    let lastX = 0, lastY = 0;
+
+    function setInfo() {
+      info.textContent = files.length ? `${index+1} / ${files.length}` : 'No files loaded';
+      filenameEl.textContent = files.length ? files[index].name : '—';
+    }
+
+    function clampIndex(i){
+      if(!files.length) return 0; if(i<0) return files.length-1; if(i>=files.length) return 0; return i;
+    }
+
+    function loadIndex(i){
+      if(!files.length) return;
+      index = clampIndex(i);
+      const f = files[index];
+      const reader = new FileReader();
+      reader.onload = e => {
+        // parse SVG safely with DOMParser (preserves <svg> even when XML prolog present)
+        try {
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(e.target.result, 'image/svg+xml');
+          const svgEl = doc.querySelector('svg');
+          if(!svgEl){ svgwrap.innerHTML = '<div style="color:#f88">Invalid SVG</div>'; return; }
+
+          // clear wrapper and append imported svg
+          svgwrap.innerHTML = '';
+          // adopt the node into this document
+          const imported = document.importNode(svgEl, true);
+          // ensure it fits the viewport by default
+          imported.setAttribute('preserveAspectRatio','xMidYMid meet');
+          // use max sizes so SVG scales to fit its container
+          imported.style.maxWidth = '100%';
+          imported.style.maxHeight = '100%';
+          imported.style.width = 'auto';
+          imported.style.height = 'auto';
+          imported.style.transformOrigin = 'center center';
+          imported.style.transition = 'transform 0s';
+          imported.style.userSelect = 'none';
+          imported.style.pointerEvents = 'all';
+          imported.style.touchAction = 'none';
+
+          svgwrap.appendChild(imported);
+
+          // reset transform state so default shows whole SVG
+          scale = 1; tx = 0; ty = 0;
+          applyTransform();
+
+          // hide the dropzone when an image is shown
+          dropzone.style.display = 'none';
+
+          setInfo();
+        } catch(err) {
+          console.error(err);
+          // fallback to object/blob rendering if inline parsing fails
+          const blobUrl = URL.createObjectURL(f);
+          svgwrap.innerHTML = '';
+          const obj = document.createElement('object');
+          obj.type = 'image/svg+xml';
+          obj.data = blobUrl;
+          obj.style.maxWidth = '100%';
+          obj.style.maxHeight = '100%';
+          obj.style.width = 'auto';
+          obj.style.height = 'auto';
+          svgwrap.appendChild(obj);
+          dropzone.style.display = 'none';
+          setInfo();
+        }
+      };
+      reader.readAsText(f);
+    }
+
+    function applyTransform(){
+      const svg = svgwrap.querySelector('svg');
+      if(!svg) return;
+      // translate in pixels then scale
+      svg.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    }
+
+    // navigation
+    prevBtn.addEventListener('click',()=>{ loadIndex(index-1); });
+    nextBtn.addEventListener('click',()=>{ loadIndex(index+1); });
+
+    zoomInBtn.addEventListener('click',()=>{ zoomAt(1.2); });
+    zoomOutBtn.addEventListener('click',()=>{ zoomAt(1/1.2); });
+    fitBtn.addEventListener('click', ()=>{ fitToView(); });
+    resetBtn.addEventListener('click', ()=>{ resetView(); });
+
+    function zoomAt(factor){
+      // zoom relative to center of viewport
+      const rect = svgwrap.getBoundingClientRect();
+      const cx = rect.width/2;
+      const cy = rect.height/2;
+
+      // compute new scale while preserving focus point
+      const prevScale = scale;
+      scale *= factor;
+      // adjust translation so center stays fixed
+      tx = (tx - cx) * (scale / prevScale) + cx;
+      ty = (ty - cy) * (scale / prevScale) + cy;
+      applyTransform();
+    }
+
+    function fitToView(){
+      // simply reset to default fit (we use width:100% height:100% and scale=1 for fit)
+      scale = 1; tx = 0; ty = 0; applyTransform();
+    }
+
+    function resetView(){
+      scale = 1; tx = 0; ty = 0; applyTransform();
+    }
+
+    // panning
+    svgwrap.addEventListener('pointerdown', e=>{
+      const svg = svgwrap.querySelector('svg'); if(!svg) return;
+      isPanning = true; svgwrap.classList.add('dragging');
+      lastX = e.clientX; lastY = e.clientY;
+      svgwrap.setPointerCapture(e.pointerId);
+    });
+    svgwrap.addEventListener('pointermove', e=>{
+      if(!isPanning) return;
+      const dx = e.clientX - lastX; const dy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      tx += dx; ty += dy; applyTransform();
+    });
+    svgwrap.addEventListener('pointerup', e=>{ isPanning=false; svgwrap.classList.remove('dragging'); try{ svgwrap.releasePointerCapture(e.pointerId);}catch(_){} });
+    svgwrap.addEventListener('pointercancel', ()=>{ isPanning=false; svgwrap.classList.remove('dragging'); });
+
+    // keyboard
+    window.addEventListener('keydown', e=>{
+      if(e.key === 'ArrowLeft'){ loadIndex(index-1); }
+      else if(e.key === 'ArrowRight'){ loadIndex(index+1); }
+      else if(e.key === '+' || e.key === '='){ zoomAt(1.2); }
+      else if(e.key === '-'){ zoomAt(1/1.2); }
+      else if(e.key === '0'){ fitToView(); }
+    });
+
+    // file selection and drag/drop
+    fileInput.addEventListener('change', e=>{
+      const list = Array.from(e.target.files).filter(f=>f.name.toLowerCase().endsWith('.svg'));
+      if(!list.length) return alert('No SVG files found in selection');
+      files = list.sort((a,b)=>a.name.localeCompare(b.name, undefined, {numeric:true}));
+      index = 0; loadIndex(0);
+    });
+
+    // drag and drop
+    // show the dropzone while dragging files, hide when dropped/left
+    ['dragenter','dragover'].forEach(ev => document.addEventListener(ev, e=>{
+      e.preventDefault();
+      dropzone.style.display = 'flex';
+      dropzone.style.color = '#ddd';
+    }));
+    ['dragleave','dragend'].forEach(ev => document.addEventListener(ev, e=>{
+      // don't hide immediately on dragleave because moving between children can fire it; rely on dragend/drop
+      e.preventDefault();
+    }));
+
+    document.addEventListener('drop', e=>{
+      e.preventDefault();
+      const dropped = Array.from(e.dataTransfer.files || []);
+      const svgs = dropped.filter(f=>f.name.toLowerCase().endsWith('.svg'));
+  if(!svgs.length){ alert('Drop a folder or SVG files'); return; }
+  files = svgs.sort((a,b)=>a.name.localeCompare(b.name, undefined, {numeric:true}));
+  index = 0; loadIndex(0);
+  // hide the overlay after loading
+  dropzone.style.display = 'none';
+    });
+
+    // small UX: focus svgwrap so keyboard works when user clicks
+    svgwrap.addEventListener('click', ()=> svgwrap.focus());
+
+    // on load show instructions
+    setInfo();
+
+    // Helpful tip: If your browser supports "Select folder", use it to pick the `allen_svg_coronal` folder.
+  </script>
+</body>
+</html>
