@@ -200,43 +200,41 @@ def delete_non_png_in_tongue(root_directory, dry_run=False, verbose=True):
     return {'deleted': deleted, 'errors': errors}
 
 
-def replace_frame_numbers_with_image_names(jaw_csv_path, tongue_folder_path, output_csv_path=None, dry_run=True):
-    """Replace the 'frame' column values in a Jaw CSV with the sorted image basenames
+def replace_frame_numbers_with_image_names(jaw_csv_path, images_folder_path, output_csv_path=None):
+    """Replace the 'frame' column values in a Jaw CSV with the corresponding image basenames
 
-    This reads a CSV with header 'frame,x,y' and replaces the values in the first
-    column with the basenames (without extension) of files found in
-    ``tongue_folder_path``, sorted ascending. The resulting CSV is written to
-    ``output_csv_path`` if provided, otherwise the original file is overwritten
-    unless ``dry_run`` is True.
+    This reads a CSV with header 'frame,x,y' where frame numbers represent indices into
+    a chronologically sorted list of images. It replaces the frame number with the actual
+    image basename at that index. Frame numbers can have gaps (e.g., 89, 106, 120) because
+    not all images have keypoints annotated.
 
     Args:
         jaw_csv_path (str): Path to the jaw CSV file to modify.
-        tongue_folder_path (str): Path to the labels/tongue folder containing images.
-        output_csv_path (str|None): Path to write the modified CSV. If None and
-            dry_run is False, will overwrite ``jaw_csv_path``.
-        dry_run (bool): If True, do not write changes, only return the planned
-            output and counts.
+        images_folder_path (str): Path to the images folder containing image files.
+        output_csv_path (str|None): Path to write the modified CSV. If None,
+            will overwrite ``jaw_csv_path``.
 
     Returns:
         dict: Summary with keys: 'rows', 'images_found', 'written' (bool),
-              'output_path' (str), 'error' (str or None)
+              'output_path' (str), 'error' (str or None), 'max_frame_index' (int or None)
     """
     import csv
 
     # Basic validation
     if not os.path.exists(jaw_csv_path):
         return {'rows': 0, 'images_found': 0, 'written': False, 'output_path': None,
-                'error': f'jaw_csv_path does not exist: {jaw_csv_path}'}
+                'error': f'jaw_csv_path does not exist: {jaw_csv_path}', 'max_frame_index': None}
 
-    if not os.path.isdir(tongue_folder_path):
+    if not os.path.isdir(images_folder_path):
         return {'rows': 0, 'images_found': 0, 'written': False, 'output_path': None,
-                'error': f'tongue_folder_path does not exist or is not a directory: {tongue_folder_path}'}
+                'error': f'images_folder_path does not exist or is not a directory: {images_folder_path}',
+                'max_frame_index': None}
 
-    # List files in tongue folder and extract basenames
-    all_files = [f for f in os.listdir(tongue_folder_path) if os.path.isfile(os.path.join(tongue_folder_path, f))]
+    # List files in images folder and extract basenames
+    all_files = [f for f in os.listdir(images_folder_path) if os.path.isfile(os.path.join(images_folder_path, f))]
     if not all_files:
         return {'rows': 0, 'images_found': 0, 'written': False, 'output_path': None,
-                'error': 'No files found in tongue folder'}
+                'error': 'No files found in images folder', 'max_frame_index': None}
 
     # Map to basenames without extension
     basenames = [os.path.splitext(f)[0] for f in all_files]
@@ -258,7 +256,7 @@ def replace_frame_numbers_with_image_names(jaw_csv_path, tongue_folder_path, out
             header = next(reader)
         except StopIteration:
             return {'rows': 0, 'images_found': len(basenames_sorted), 'written': False,
-                    'output_path': None, 'error': 'Empty CSV'}
+                    'output_path': None, 'error': 'Empty CSV', 'max_frame_index': None}
         # Keep the rest
         for r in reader:
             if not r:
@@ -268,25 +266,38 @@ def replace_frame_numbers_with_image_names(jaw_csv_path, tongue_folder_path, out
     num_rows = len(rows)
     num_images = len(basenames_sorted)
 
-    if num_images < num_rows:
+    # Find the maximum frame index used in the CSV
+    max_frame_index = None
+    try:
+        frame_indices = [int(row[0]) for row in rows if row[0].strip()]
+        max_frame_index = max(frame_indices) if frame_indices else None
+    except (ValueError, IndexError):
         return {'rows': num_rows, 'images_found': num_images, 'written': False, 'output_path': None,
-                'error': 'Not enough images to replace all frame values'}
+                'error': 'Could not parse frame numbers as integers', 'max_frame_index': None}
 
-    # Replace the first column values with basenames (use first N images)
+    # Check if we have enough images for the maximum frame index
+    if max_frame_index is not None and max_frame_index >= num_images:
+        return {'rows': num_rows, 'images_found': num_images, 'written': False, 'output_path': None,
+                'error': f'Not enough images. Max frame index is {max_frame_index} but only have {num_images} images (need at least {max_frame_index + 1})',
+                'max_frame_index': max_frame_index}
+
+    # Replace frame indices with corresponding image basenames
     new_rows = []
-    for i, row in enumerate(rows):
-        new_frame = basenames_sorted[i]
-        # Ensure row has at least 3 columns; if not, pad with empty strings
-        while len(row) < 3:
-            row.append('')
-        new_rows.append([new_frame, row[1], row[2]])
+    for row in rows:
+        try:
+            frame_index = int(row[0])
+            new_frame = basenames_sorted[frame_index]
+            # Ensure row has at least 3 columns; if not, pad with empty strings
+            while len(row) < 3:
+                row.append('')
+            new_rows.append([new_frame, row[1], row[2]])
+        except (ValueError, IndexError) as e:
+            return {'rows': num_rows, 'images_found': num_images, 'written': False, 'output_path': None,
+                    'error': f'Error processing row {row}: {e}', 'max_frame_index': max_frame_index}
 
     # Decide output path
     if output_csv_path is None:
         output_csv_path = jaw_csv_path
-
-    if dry_run:
-        return {'rows': num_rows, 'images_found': num_images, 'written': False, 'output_path': output_csv_path, 'error': None}
 
     # Write CSV
     try:
@@ -295,9 +306,11 @@ def replace_frame_numbers_with_image_names(jaw_csv_path, tongue_folder_path, out
             writer.writerow(header)
             for r in new_rows:
                 writer.writerow(r)
-        return {'rows': num_rows, 'images_found': num_images, 'written': True, 'output_path': output_csv_path, 'error': None}
+        return {'rows': num_rows, 'images_found': num_images, 'written': True, 
+                'output_path': output_csv_path, 'error': None, 'max_frame_index': max_frame_index}
     except Exception as e:
-        return {'rows': num_rows, 'images_found': num_images, 'written': False, 'output_path': output_csv_path, 'error': str(e)}
+        return {'rows': num_rows, 'images_found': num_images, 'written': False, 
+                'output_path': output_csv_path, 'error': str(e), 'max_frame_index': max_frame_index}
 
 
 if __name__ == '__main__':
