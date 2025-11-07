@@ -313,6 +313,182 @@ def replace_frame_numbers_with_image_names(jaw_csv_path, images_folder_path, out
                 'output_path': output_csv_path, 'error': str(e), 'max_frame_index': max_frame_index}
 
 
+def count_csv_rows(csv_path):
+    """Count rows in CSV file, excluding header (returns count - 1).
+    
+    Automatically detects delimiter (comma, space, semicolon, tab, pipe) 
+    and handles different line endings.
+    
+    Args:
+        csv_path: Path object or string path to CSV file
+        
+    Returns:
+        tuple: (row_count, status_message) where row_count is None if error occurred
+    """
+    import csv
+    from pathlib import Path
+    
+    csv_path = Path(csv_path)
+    if not csv_path.exists() or not csv_path.is_file():
+        return None, "File not found"
+    
+    try:
+        with open(csv_path, 'r', encoding='utf-8', newline='') as f:
+            sample = f.read(8192)
+            f.seek(0)
+            
+            try:
+                sniffer = csv.Sniffer()
+                dialect = sniffer.sniff(sample, delimiters=', ;\t|')
+                reader = csv.reader(f, dialect=dialect)
+            except csv.Error:
+                f.seek(0)
+                first_line = f.readline()
+                f.seek(0)
+                
+                delimiters = [',', ' ', ';', '\t', '|']
+                delimiter_counts = [(d, first_line.count(d)) for d in delimiters]
+                best_delimiter = max(delimiter_counts, key=lambda x: x[1])[0]
+                
+                reader = csv.reader(f, delimiter=best_delimiter)
+            
+            row_count = 0
+            for row in reader:
+                if any(cell.strip() for cell in row):
+                    row_count += 1
+            
+            return max(0, row_count - 1), "Success"
+    except Exception as e:
+        return None, f"Error: {e}"
+
+
+def scan_csv_in_labels_subfolders(root_dir, subfolder_name='jaw'):
+    """Scan folders for CSV files in labels/<subfolder_name> and count rows.
+    
+    Args:
+        root_dir: Path to root directory containing subfolders
+        subfolder_name: Name of subfolder within labels to search (default: 'jaw')
+        
+    Returns:
+        dict: Contains 'results' (list of dicts), 'total_rows', 'folders_found', 'folders_missing'
+    """
+    from pathlib import Path
+    
+    root = Path(root_dir)
+    if not root.exists():
+        raise FileNotFoundError(f'Root path does not exist: {root}')
+    if not root.is_dir():
+        raise NotADirectoryError(f'Root is not a directory: {root}')
+    
+    results = []
+    total_rows = 0
+    folders_found = 0
+    folders_missing = 0
+    
+    children = sorted([p for p in root.iterdir() if p.is_dir()])
+    
+    print(f"Scanning {len(children)} folders in {root_dir}")
+    print(f"Looking for CSV files in: labels/{subfolder_name}/\n")
+    
+    for child in children:
+        target_dir = child / 'labels' / subfolder_name
+        
+        if not target_dir.exists() or not target_dir.is_dir():
+            results.append({
+                'Folder': child.name,
+                'CSV File': 'N/A',
+                'Rows (excluding header)': 0,
+                'Status': f'labels/{subfolder_name} directory not found'
+            })
+            folders_missing += 1
+            continue
+        
+        csv_files = list(target_dir.glob('*.csv'))
+        
+        if not csv_files:
+            results.append({
+                'Folder': child.name,
+                'CSV File': 'N/A',
+                'Rows (excluding header)': 0,
+                'Status': 'No CSV files found'
+            })
+            folders_missing += 1
+        else:
+            for csv_file in csv_files:
+                row_count, status = count_csv_rows(csv_file)
+                
+                if row_count is not None:
+                    results.append({
+                        'Folder': child.name,
+                        'CSV File': csv_file.name,
+                        'Rows (excluding header)': row_count,
+                        'Status': status
+                    })
+                    total_rows += row_count
+                    folders_found += 1
+                else:
+                    results.append({
+                        'Folder': child.name,
+                        'CSV File': csv_file.name,
+                        'Rows (excluding header)': 0,
+                        'Status': status
+                    })
+    
+    print(f"Found CSV files in {folders_found} cases")
+    print(f"Missing or failed: {folders_missing}")
+    print(f"Total rows (excluding headers): {total_rows}\n")
+    
+    return {
+        'results': results,
+        'total_rows': total_rows,
+        'folders_found': folders_found,
+        'folders_missing': folders_missing
+    }
+
+
+def display_csv_scan_results(scan_data):
+    """Display results from scan_csv_in_labels_subfolders in a formatted table.
+    
+    Args:
+        scan_data: Dictionary returned from scan_csv_in_labels_subfolders
+        
+    Returns:
+        tuple: (df_with_totals, df_valid) - DataFrames with all results and valid results only
+    """
+    import pandas as pd
+    
+    results = scan_data['results']
+    total_rows = scan_data['total_rows']
+    folders_found = scan_data['folders_found']
+    folders_missing = scan_data['folders_missing']
+    
+    df = pd.DataFrame(results)
+    
+    totals = pd.DataFrame([{
+        'Folder': 'TOTAL',
+        'CSV File': f'{folders_found} files',
+        'Rows (excluding header)': total_rows,
+        'Status': f'{folders_found} found, {folders_missing} missing'
+    }])
+    
+    df_with_totals = pd.concat([df, totals], ignore_index=True)
+    
+    print("=" * 80)
+    print("CSV Row Counts by Folder:")
+    print("=" * 80)
+    
+    df_valid = df[df['Status'] == 'Success'].copy()
+    
+    if len(df_valid) > 0:
+        print(f"\nStatistics for valid CSV files:")
+        print(f"  Min rows: {df_valid['Rows (excluding header)'].min()}")
+        print(f"  Max rows: {df_valid['Rows (excluding header)'].max()}")
+        print(f"  Mean rows: {df_valid['Rows (excluding header)'].mean():.2f}")
+        print(f"  Median rows: {df_valid['Rows (excluding header)'].median():.2f}")
+    
+    return df_with_totals, df_valid
+
+
 if __name__ == '__main__':
     # Simple CLI for local runs
     import argparse
